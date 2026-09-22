@@ -15,6 +15,12 @@
     <!-- Staying connected while the phone is in a pocket. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- The auto coach listens through the phone's microphone while the phone
+         is in a pocket. Android 14 refuses microphone access from a
+         backgrounded app without a service that declares this type, and kills
+         the process rather than simply denying it. Off by default, and off
+         again the moment the switch is flipped. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- Only for the speedometer, which is off by default. Android will not
          deliver GPS fixes to a backgrounded app without it, and a speed
          readout that stops when the screen locks is worthless. The reading is
@@ -100,11 +106,11 @@
             android:name="fr.simonlabbe.g1extended.BackgroundService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|location" />
+            android:foregroundServiceType="connectedDevice|location|microphone" />
 
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
-            android:foregroundServiceType="connectedDevice|location" />
+            android:foregroundServiceType="connectedDevice|location|microphone" />
 
         <service
             android:label="notifications"

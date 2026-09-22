@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:g1_extended/models/g1/battery.dart';
 import 'package:g1_extended/screens/settings/about_screen.dart';
 import 'package:g1_extended/screens/settings/assistant_screen.dart';
+import 'package:g1_extended/screens/settings/auto_coach_screen.dart';
 import 'package:g1_extended/screens/settings/clocks_screen.dart';
 import 'package:g1_extended/screens/settings/extensions_screen.dart';
 import 'package:g1_extended/screens/settings/custom_cards_screen.dart';
@@ -304,6 +305,12 @@ class _GlassesSettingsPageState extends State<GlassesSettingsPage> {
         title: 'Assistant',
         subtitle: 'Ask a model you host, or one you chose.',
         builder: (_) => const AssistantScreen(),
+      ),
+      _SettingsEntry(
+        pixels: PixelArtwork.captions,
+        title: 'Coach',
+        subtitle: 'Answers on the lens without tapping anything.',
+        builder: (_) => const AutoCoachScreen(),
       ),
       _SettingsEntry(
         pixels: PixelArtwork.mic,

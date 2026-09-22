@@ -41,13 +41,19 @@ class UpdateService {
   static final UpdateService singleton = UpdateService._internal();
   factory UpdateService() => singleton;
 
+  // This build is a fork, signed with a debug key, so it cannot install a
+  // release published by the upstream project - Android refuses the update on
+  // the signature mismatch and the wearer is left with a banner that can never
+  // be dismissed. Point the check at the fork that produced this build.
+  static const String _upstreamRepo = 'abhinaba1997/G1_Extended';
+
   static const String _latestUrl =
-      'https://api.github.com/repos/LabbeSimon/G1_Extended/releases/latest';
+      'https://api.github.com/repos/$_upstreamRepo/releases/latest';
 
   /// All releases, newest first — the only way to see pre-releases, which
   /// GitHub deliberately keeps out of /releases/latest.
   static const String _allReleasesUrl =
-      'https://api.github.com/repos/LabbeSimon/G1_Extended/releases?per_page=20';
+      'https://api.github.com/repos/$_upstreamRepo/releases?per_page=20';
 
   static const String _betaKey = 'update_channel_beta';
 

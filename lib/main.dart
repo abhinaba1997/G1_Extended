@@ -13,6 +13,7 @@ import 'package:g1_extended/models/dashboard/checklist.dart';
 import 'package:g1_extended/models/dashboard/daily.dart';
 import 'package:g1_extended/models/dashboard/stop.dart';
 import 'package:g1_extended/screens/home_screen.dart';
+import 'package:g1_extended/services/auto_coach_service.dart';
 import 'package:g1_extended/services/bluetooth_background_service.dart';
 import 'package:g1_extended/services/bluetooth_manager.dart';
 import 'package:g1_extended/services/crash_reporter.dart';
@@ -84,6 +85,7 @@ void main() async {
       WidgetPanel.schedule();
     });
     await _step('voice pipeline', VoicePipeline.singleton.start);
+    await _step('auto coach', AutoCoachService.singleton.resumeIfEnabled);
     await _step('legacy service', _startLegacyBackgroundService);
 
     runApp(const G1ExtendedApp());
