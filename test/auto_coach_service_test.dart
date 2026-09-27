@@ -107,4 +107,85 @@ void main() {
       expect(clamped.endsWith('\u2026'), isTrue);
     });
   });
+
+  group('SpeakerTagger', () {
+    test('gives the first voice a reference but no tag', () {
+      final tagger = SpeakerTagger();
+      expect(tagger.tag(-30), '?');
+      expect(tagger.peakDb, -30);
+    });
+
+    test('calls a line close to the peak the wearer', () {
+      final tagger = SpeakerTagger()..tag(-30);
+      expect(tagger.tag(-33), 'me');
+    });
+
+    test('calls a much quieter line the room', () {
+      final tagger = SpeakerTagger()..tag(-30);
+      expect(tagger.tag(-45), 'them');
+    });
+
+    test('admits it cannot tell when the level sits between the two', () {
+      final tagger = SpeakerTagger()..tag(-30);
+      expect(tagger.tag(-38), '?');
+    });
+
+    test('ignores silence rather than tagging it', () {
+      final tagger = SpeakerTagger();
+      expect(tagger.tag(-80), '?');
+      expect(tagger.peakDb.isInfinite, isTrue);
+    });
+
+    test('a louder line becomes the new reference', () {
+      final tagger = SpeakerTagger()..tag(-40);
+      expect(tagger.tag(-30), 'me');
+      expect(tagger.peakDb, -30);
+    });
+
+    test('the reference decays so a quiet room stops pinning it', () {
+      final tagger = SpeakerTagger(decayDb: 2)..tag(-30);
+      tagger.tag(-45); // the room, and the peak forgets two decibels
+      expect(tagger.peakDb, -32);
+    });
+  });
+
+  group('LevelMeter', () {
+    test('reports silence as very quiet', () {
+      final meter = LevelMeter()..observe([0, 0, 0, 0]);
+      expect(meter.db, lessThan(-100));
+    });
+
+    test('reads little-endian samples', () {
+      // 1000 as a signed 16-bit little-endian sample: 0x03e8.
+      final meter = LevelMeter()..observe([0xe8, 0x03]);
+      expect(meter.db, closeTo(-30.3, 0.1));
+    });
+
+    test('reports full scale as about zero', () {
+      final meter = LevelMeter()..observe([0xff, 0x7f, 0xff, 0x7f]);
+      expect(meter.db, closeTo(0, 0.1));
+    });
+
+    test('says nothing when nothing was fed', () {
+      expect(LevelMeter().db.isInfinite, isTrue);
+    });
+
+    test('resets between utterances', () {
+      final meter = LevelMeter()..observe([0xff, 0x7f]);
+      meter.reset();
+      expect(meter.db.isInfinite, isTrue);
+    });
+  });
+
+  group('HeardLine', () {
+    test('carries the speaker tag to the coach', () {
+      final line = HeardLine('where is the money', DateTime(2026, 9, 27),
+          who: 'them');
+      expect(line.toJson(), {'who': 'them', 'text': 'where is the money'});
+    });
+
+    test('defaults to untagged rather than guessing', () {
+      expect(HeardLine('something said', DateTime(2026, 9, 27)).who, '?');
+    });
+  });
 }

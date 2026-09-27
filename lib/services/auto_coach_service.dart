@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -7,21 +9,125 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:g1_extended/services/assistant_service.dart';
 import 'package:g1_extended/services/bluetooth_manager.dart';
+import 'package:g1_extended/services/bluetooth_reciever.dart';
 import 'package:g1_extended/services/speech_recognition_service.dart';
+import 'package:g1_extended/utils/lc3.dart';
 
-/// One heard line, with the time it was heard.
+/// One heard line, with the time it was heard and who probably said it.
 ///
-/// There is no speaker field. On-device recognition cannot tell the wearer's
-/// voice from anyone else's, and a guess here would be worse than silence: the
-/// coach decides what to answer, and a wrong "they said this" is exactly the
+/// The speaker tag comes from loudness alone and is therefore a guess: the
+/// wearer's voice reaches the temple microphones across a few centimetres, the
+/// room's arrives across the table, and that difference is most of what there
+/// is to go on. `?` is a real answer - a wrong "they said this" is exactly the
 /// kind of error that produces a confident answer to the wrong question.
 class HeardLine {
   final String text;
   final DateTime at;
 
-  const HeardLine(this.text, this.at);
+  /// `me`, `them`, or `?` when the level was too close to call.
+  final String who;
 
-  Map<String, dynamic> toJson() => {'who': '?', 'text': text};
+  const HeardLine(this.text, this.at, {this.who = '?'});
+
+  Map<String, dynamic> toJson() => {'who': who, 'text': text};
+}
+
+/// Where the coach listens.
+enum CoachCapture {
+  /// The glasses' own microphones. Hears the room from the wearer's head and
+  /// keeps working with the phone in a pocket; transcribed on the device by
+  /// Vosk, which is why it needs the offline model downloaded.
+  glasses,
+
+  /// The phone's microphone through the platform recogniser: better on one
+  /// clean voice, but it hears a meeting through a pocket and goes silent the
+  /// moment the phone is put away.
+  phone,
+}
+
+/// Guesses the speaker from how loud the line was.
+///
+/// The reference is the loudest recent utterance, on the argument that the
+/// wearer is the person closest to their own microphones: in a room where they
+/// speak at all, their lines sit at the top of the distribution. Every line is
+/// judged against that peak, which decays slowly so a room that has gone quiet
+/// stops pinning the reference.
+///
+/// This is a heuristic and it is meant to be tuned from the settings card,
+/// which shows the level of each line and the tag it earned.
+class SpeakerTagger {
+  SpeakerTagger({
+    this.meMarginDb = 6.0,
+    this.roomMarginDb = 12.0,
+    this.decayDb = 1.0,
+    this.floorDb = -55.0,
+  });
+
+  /// Within this much of the peak, the line is the wearer's.
+  final double meMarginDb;
+
+  /// This far below the peak, it is the room's.
+  final double roomMarginDb;
+
+  /// How much the peak forgets between lines.
+  final double decayDb;
+
+  /// Below this, nothing was said: silence and handling noise are not speech.
+  final double floorDb;
+
+  double _peakDb = double.negativeInfinity;
+
+  double get peakDb => _peakDb;
+
+  /// Tags one utterance, and updates the reference with it.
+  String tag(double utteranceDb) {
+    if (utteranceDb <= floorDb || utteranceDb.isNaN) return '?';
+
+    if (_peakDb.isInfinite) {
+      // The first voice heard sets the reference, and gets no tag: at that
+      // point there is nothing to compare it against.
+      _peakDb = utteranceDb;
+      return '?';
+    }
+
+    final delta = utteranceDb - _peakDb;
+    _peakDb = utteranceDb > _peakDb ? utteranceDb : _peakDb - decayDb;
+
+    if (delta >= -meMarginDb) return 'me';
+    if (delta <= -roomMarginDb) return 'them';
+    return '?';
+  }
+}
+
+/// Root-mean-square level of the audio between two utterances.
+///
+/// Kept deliberately dumb: one sum of squares over the samples fed since the
+/// last utterance ended. The recogniser finalises on silence, so that span is
+/// the utterance almost exactly.
+class LevelMeter {
+  double _sumSquares = 0;
+  int _samples = 0;
+
+  void observe(List<int> pcm16) {
+    for (int i = 0; i + 1 < pcm16.length; i += 2) {
+      var sample = (pcm16[i] & 0xff) | (pcm16[i + 1] << 8);
+      if (sample >= 0x8000) sample -= 0x10000; // signed 16-bit
+      _sumSquares += (sample * sample).toDouble();
+      _samples++;
+    }
+  }
+
+  /// Mean level in dBFS, or [double.negativeInfinity] when nothing was fed.
+  double get db {
+    if (_samples == 0) return double.negativeInfinity;
+    final rms = math.sqrt(_sumSquares / _samples);
+    return rms <= 0 ? -120.0 : 20 * (math.log(rms / 32768) / math.ln10);
+  }
+
+  void reset() {
+    _sumSquares = 0;
+    _samples = 0;
+  }
 }
 
 /// Listens continuously and puts a line on the lens when one is warranted.
@@ -47,6 +153,14 @@ class AutoCoachService {
   static const _enabledKey = 'coach_auto_enabled';
   static const _urlKey = 'coach_auto_url';
   static const _localeKey = 'coach_auto_locale';
+  static const _captureKey = 'coach_capture';
+
+  /// How often the glasses' audio buffer is drained and decoded.
+  ///
+  /// Short enough that the recogniser sees the audio as it is spoken, long
+  /// enough that decoding a 10 ms frame batch is not the phone's whole
+  /// afternoon. The recogniser, not this, decides where an utterance ends.
+  static const Duration drainInterval = Duration(milliseconds: 250);
 
   /// How many lines of context travel with each request. Enough to carry a
   /// question and the answer to it, short enough to stay fast and cheap.
@@ -88,6 +202,16 @@ class AutoCoachService {
   String _lastLine = '';
   String _lastOutcome = 'nothing yet';
 
+  /// The source actually capturing right now, and the tag the last line earned
+  /// with the level it earned it at. Shown on the settings card so the speaker
+  /// heuristic can be judged against real rooms rather than argued about.
+  CoachCapture? _captureActive;
+  String _lastTag = '?';
+  double _lastLevelDb = double.negativeInfinity;
+
+  final SpeakerTagger _tagger = SpeakerTagger();
+  final LevelMeter _meter = LevelMeter();
+
   final StreamController<HeardLine> _heardController =
       StreamController<HeardLine>.broadcast();
   final StreamController<String> _coachController =
@@ -109,6 +233,37 @@ class AutoCoachService {
   /// One phrase for where the last utterance ended up: on the lens, held back by
   /// the coach and why, or lost between the phone and the glasses.
   String get lastOutcome => _lastOutcome;
+
+  /// Which microphone is feeding the coach right now, or null when it is idle.
+  CoachCapture? get captureActive => _captureActive;
+
+  /// The tag the last heard line earned, and the level it earned it at.
+  String get lastTag => _lastTag;
+
+  double get lastLevelDb => _lastLevelDb;
+
+  /// Where the coach listens, when it has the choice.
+  Future<CoachCapture> capture() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString(_captureKey) ?? CoachCapture.glasses.name;
+    return CoachCapture.values.firstWhere(
+      (c) => c.name == stored,
+      orElse: () => CoachCapture.glasses,
+    );
+  }
+
+  Future<void> setCapture(CoachCapture value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_captureKey, value.name);
+
+    // Restart rather than swap underneath the running loop: one microphone has
+    // to be closed before the other opens, or both are open at once.
+    if (_running) {
+      await stop();
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      unawaited(start());
+    }
+  }
 
   Future<bool> isEnabled() async {
     final prefs = await SharedPreferences.getInstance();
@@ -195,6 +350,103 @@ class AutoCoachService {
     if (_running) return;
     _running = true;
     _stopRequested = false;
+
+    final chosen = await capture();
+
+    try {
+      if (chosen == CoachCapture.glasses && _bluetooth.isConnected) {
+        try {
+          await _listenThroughGlasses();
+        } catch (e) {
+          // A missing offline model is a configuration problem, not a reason to
+          // sit in silence: the phone recogniser needs nothing downloaded, so
+          // the sitting carries on with the worse microphone and says so.
+          debugPrint('AutoCoachService: glasses capture failed: $e');
+          _lastOutcome = 'glasses capture failed, using the phone: $e';
+          if (!_stopRequested) await _listenThroughPhone();
+        }
+      } else {
+        if (chosen == CoachCapture.glasses) {
+          _lastOutcome = 'glasses not connected - listening on the phone';
+        }
+        await _listenThroughPhone();
+      }
+    } catch (e) {
+      debugPrint('AutoCoachService: capture failed: $e');
+      _lastOutcome = 'capture failed: $e';
+    }
+
+    _captureActive = null;
+    _running = false;
+    debugPrint('AutoCoachService: stopped');
+  }
+
+  /// Listens through the glasses' own microphones.
+  ///
+  /// The glasses stream LC3 frames from their microphones over BLE; the app
+  /// collects them, decodes to 16 kHz PCM and feeds Vosk on the device. This is
+  /// the microphone that hears the room the wearer is standing in rather than
+  /// the inside of their pocket, and it is the only one that can say anything
+  /// about who spoke, because it can measure how loudly each line arrived.
+  ///
+  /// The recogniser, not a timer, decides where an utterance ends: Vosk
+  /// finalises after roughly half a second of silence, which is the endpoint
+  /// debounce a line-at-a-time coach needs.
+  Future<void> _listenThroughGlasses() async {
+    final collector = BluetoothReciever.singleton.voiceCollector;
+    final live = await _speech.startLiveTranscription();
+    final pending = <String>[];
+    final subscription = live.sentences.listen(pending.add);
+
+    _captureActive = CoachCapture.glasses;
+    _lastOutcome = 'listening on the glasses';
+    debugPrint('AutoCoachService: listening on the glasses microphone');
+
+    try {
+      collector.reset();
+      collector.isRecording = true;
+      await _bluetooth.setMicrophone(true);
+
+      while (!_stopRequested) {
+        await Future<void>.delayed(drainInterval);
+
+        final encoded = await collector.getAllDataAndReset();
+        if (encoded.isEmpty) continue;
+
+        final pcm = await LC3.decodeLC3(Uint8List.fromList(encoded));
+        if (pcm.isEmpty) continue;
+
+        _meter.observe(pcm);
+        await live.feed(pcm);
+
+        while (pending.isNotEmpty && !_stopRequested) {
+          final text = pending.removeAt(0);
+          final db = _meter.db;
+          _meter.reset();
+          if (!isWorthSending(text)) continue;
+
+          final tag = _tagger.tag(db);
+          _lastTag = tag;
+          _lastLevelDb = db;
+          await _recordLine(HeardLine(text.trim(), DateTime.now(), who: tag));
+        }
+      }
+    } finally {
+      collector.isRecording = false;
+      await subscription.cancel();
+      await live.close();
+      try {
+        await _bluetooth.setMicrophone(false);
+      } catch (e) {
+        debugPrint('AutoCoachService: could not close the glasses mic: $e');
+      }
+    }
+  }
+
+  /// Listens through the phone's microphone, on the platform recogniser.
+  Future<void> _listenThroughPhone() async {
+    _captureActive = CoachCapture.phone;
+    if (_lastOutcome == 'nothing yet') _lastOutcome = 'listening on the phone';
     debugPrint('AutoCoachService: listening on the phone microphone');
 
     final chosenLocale = await locale();
@@ -208,16 +460,11 @@ class AutoCoachService {
         if (_stopRequested) break;
         if (heard == null || !isWorthSending(heard)) continue;
 
-        final line = HeardLine(heard.trim(), DateTime.now());
-        _lastHeard = line.text;
-        _window.add(line);
-        final trimmed = trim(_window);
-        _window
-          ..clear()
-          ..addAll(trimmed);
-        if (!_heardController.isClosed) _heardController.add(line);
-
-        await _ask();
+        // The platform recogniser reports no level and knows nothing about who
+        // was speaking, so every line from this path stays untagged.
+        _lastTag = '?';
+        _lastLevelDb = double.negativeInfinity;
+        await _recordLine(HeardLine(heard.trim(), DateTime.now()));
       } catch (e) {
         // A recogniser that refuses (no permission, no network for a locale)
         // must not spin: pause, then try again.
@@ -225,9 +472,18 @@ class AutoCoachService {
         await Future<void>.delayed(const Duration(seconds: 5));
       }
     }
+  }
 
-    _running = false;
-    debugPrint('AutoCoachService: stopped');
+  /// Adds a heard line to the window and asks the coach about it.
+  Future<void> _recordLine(HeardLine line) async {
+    _lastHeard = line.text;
+    _window.add(line);
+    final trimmed = trim(_window);
+    _window
+      ..clear()
+      ..addAll(trimmed);
+    if (!_heardController.isClosed) _heardController.add(line);
+    await _ask();
   }
 
   Future<void> stop() async {

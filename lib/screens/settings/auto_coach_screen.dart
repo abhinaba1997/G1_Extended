@@ -28,6 +28,7 @@ class _AutoCoachScreenState extends State<AutoCoachScreen> {
   bool _loading = true;
   bool _enabled = false;
   bool _testing = false;
+  CoachCapture _capture = CoachCapture.glasses;
   String _resolvedEndpoint = '';
   String _testResult = '';
 
@@ -56,15 +57,34 @@ class _AutoCoachScreenState extends State<AutoCoachScreen> {
     final enabled = await _coach.isEnabled();
     final locale = await _coach.locale();
     final endpoint = await _coach.endpoint();
+    final capture = await _coach.capture();
     if (!mounted) return;
     setState(() {
       _enabled = enabled;
+      _capture = capture;
       _localeController.text = locale;
       _endpointController.text = endpoint;
       _resolvedEndpoint = endpoint;
       _loading = false;
     });
   }
+
+  Future<void> _setCapture(CoachCapture value) async {
+    setState(() => _capture = value);
+    await _coach.setCapture(value);
+  }
+
+  static String _sourceName(CoachCapture source) => switch (source) {
+        CoachCapture.glasses => 'the glasses microphones',
+        CoachCapture.phone => 'the phone microphone',
+      };
+
+  /// One word for who the level heuristic thought was speaking.
+  static String _tagLabel(String tag) => switch (tag) {
+        'me' => 'my own line',
+        'them' => 'the room',
+        _ => 'unclear',
+      };
 
   Future<void> _setEnabled(bool value) async {
     // Ask for the microphone before switching on: a coach that silently never
@@ -199,6 +219,34 @@ class _AutoCoachScreenState extends State<AutoCoachScreen> {
             ),
           ),
           const SizedBox(height: 16),
+          Text('Where it listens', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final entry in const [
+                (CoachCapture.glasses, 'Glasses microphones'),
+                (CoachCapture.phone, 'Phone microphone'),
+              ])
+                ChoiceChip(
+                  label: Text(entry.$2),
+                  selected: _capture == entry.$1,
+                  onSelected: (_) => _setCapture(entry.$1),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'The glasses hear the room from your head and keep working with the '
+            'phone in your pocket, and they are the only source that can tell '
+            'your own lines from the room by how loudly each one arrives. They '
+            'are transcribed on the device, so the offline speech model must be '
+            'downloaded. The phone is more accurate on one clean voice but '
+            'hears a meeting through a pocket and stops when the phone is put '
+            'away.',
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 16),
           TextField(
             controller: _localeController,
             decoration: const InputDecoration(
@@ -273,7 +321,7 @@ class _AutoCoachScreenState extends State<AutoCoachScreen> {
                   const SizedBox(height: 8),
                   Text(
                     _coach.isRunning
-                        ? 'Listening through the phone microphone.'
+                        ? 'Listening on ${_sourceName(_coach.captureActive ?? _capture)}.'
                         : 'Not listening. The switch above is off, or it was '
                             'never switched on in this install.',
                     style: theme.textTheme.bodySmall,
@@ -289,6 +337,11 @@ class _AutoCoachScreenState extends State<AutoCoachScreen> {
                   ),
                   Text(
                     'Where it went: ${_coach.lastOutcome}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  Text(
+                    'Judged: ${_tagLabel(_coach.lastTag)}'
+                    '${_coach.lastLevelDb.isFinite ? ' at ${_coach.lastLevelDb.toStringAsFixed(1)} dBFS' : ''}',
                     style: theme.textTheme.bodySmall,
                   ),
                   const SizedBox(height: 8),

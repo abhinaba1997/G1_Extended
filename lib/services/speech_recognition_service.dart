@@ -161,9 +161,19 @@ class LiveTranscription {
   final vosk.Recognizer _recognizer;
   final StreamController<String> _controller =
       StreamController<String>.broadcast();
+  final StreamController<String> _sentenceController =
+      StreamController<String>.broadcast();
 
   /// Text recognised so far, updated as audio is fed in.
   Stream<String> get text => _controller.stream;
+
+  /// Text the recogniser has finalised, one event per utterance.
+  ///
+  /// [text] carries every update including partials, which is what a live
+  /// caption wants. This carries only completions, which is what anything that
+  /// acts on a sentence needs: a partial is a moving target, and a coach
+  /// answering a half-heard sentence answers the wrong thing.
+  Stream<String> get sentences => _sentenceController.stream;
 
   bool _closed = false;
 
@@ -185,6 +195,9 @@ class LiveTranscription {
       if (trimmed.isNotEmpty && !_controller.isClosed) {
         _controller.add(trimmed);
       }
+      if (endOfSentence && trimmed.isNotEmpty && !_sentenceController.isClosed) {
+        _sentenceController.add(trimmed);
+      }
     } catch (e) {
       debugPrint('LiveTranscription: chunk dropped: $e');
     }
@@ -196,5 +209,6 @@ class LiveTranscription {
     _closed = true;
     await _recognizer.dispose();
     await _controller.close();
+    await _sentenceController.close();
   }
 }
