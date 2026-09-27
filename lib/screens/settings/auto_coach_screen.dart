@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -30,14 +31,22 @@ class _AutoCoachScreenState extends State<AutoCoachScreen> {
   String _resolvedEndpoint = '';
   String _testResult = '';
 
+  /// Redraws the live card below. Everything this feature does happens out of
+  /// sight, so without this a blank lens and a working coach look the same.
+  Timer? _ticker;
+
   @override
   void initState() {
     super.initState();
     _load();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
   void dispose() {
+    _ticker?.cancel();
     _localeController.dispose();
     _endpointController.dispose();
     super.dispose();
@@ -251,6 +260,48 @@ class _AutoCoachScreenState extends State<AutoCoachScreen> {
               ),
             ),
           ],
+          const SizedBox(height: 24),
+          Card(
+            color: theme.colorScheme.surfaceContainerHighest,
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('What it is doing now',
+                      style: theme.textTheme.titleSmall),
+                  const SizedBox(height: 8),
+                  Text(
+                    _coach.isRunning
+                        ? 'Listening through the phone microphone.'
+                        : 'Not listening. The switch above is off, or it was '
+                            'never switched on in this install.',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Last thing heard: ${_coach.lastHeard.isEmpty ? 'nothing yet' : _coach.lastHeard}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  Text(
+                    'Last line for the lens: ${_coach.lastLine.isEmpty ? 'none yet' : _coach.lastLine}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  Text(
+                    'Where it went: ${_coach.lastOutcome}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Use this to tell a blank lens apart from a silent coach: '
+                    '"held back by the coach" is the feature working, '
+                    '"lens write failed" means the glasses were not connected.',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ),
           const SizedBox(height: 24),
           Text(
             'Battery: the microphone and the network stay awake, so expect '

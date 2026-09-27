@@ -80,6 +80,14 @@ class AutoCoachService {
   int _consecutiveFailures = 0;
   DateTime _lastFailureAt = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// What the settings screen shows, because everything this service does is
+  /// otherwise invisible: a coach that hears nothing, a coach that declines
+  /// every line, and a lens write that fails all look the same from the sofa -
+  /// a blank lens with no way to tell which of the three it was.
+  String _lastHeard = '';
+  String _lastLine = '';
+  String _lastOutcome = 'nothing yet';
+
   final StreamController<HeardLine> _heardController =
       StreamController<HeardLine>.broadcast();
   final StreamController<String> _coachController =
@@ -89,6 +97,18 @@ class AutoCoachService {
   Stream<HeardLine> get heard => _heardController.stream;
   Stream<String> get coached => _coachController.stream;
   List<HeardLine> get window => List.unmodifiable(_window);
+
+  /// The last utterance that was long enough to send, and what became of it.
+  /// Read by the settings screen; see [_lastHeard].
+  String get lastHeard => _lastHeard;
+
+  /// The last line that reached the lens, or the last line the coach produced
+  /// and could not put there.
+  String get lastLine => _lastLine;
+
+  /// One phrase for where the last utterance ended up: on the lens, held back by
+  /// the coach and why, or lost between the phone and the glasses.
+  String get lastOutcome => _lastOutcome;
 
   Future<bool> isEnabled() async {
     final prefs = await SharedPreferences.getInstance();
@@ -108,8 +128,14 @@ class AutoCoachService {
   /// Called at boot. Listening survives a restart only if the wearer left it
   /// on - an app that starts the microphone by itself after an update is a
   /// nasty surprise, and on a phone in a pocket nobody would notice.
+  ///
+  /// The listen loop is deliberately not awaited. [start] runs until it is
+  /// stopped, so awaiting it here hung whoever called it - and at boot the
+  /// caller is `main`, which never reached `runApp`. The symptom was a black
+  /// screen with no error and no log: the app was alive and listening, with no
+  /// interface to prove it.
   Future<void> resumeIfEnabled() async {
-    if (await isEnabled()) await start();
+    if (await isEnabled()) unawaited(start());
   }
 
   Future<String> locale() async {
@@ -183,6 +209,7 @@ class AutoCoachService {
         if (heard == null || !isWorthSending(heard)) continue;
 
         final line = HeardLine(heard.trim(), DateTime.now());
+        _lastHeard = line.text;
         _window.add(line);
         final trimmed = trim(_window);
         _window
@@ -213,13 +240,19 @@ class AutoCoachService {
 
   Future<void> _ask() async {
     final url = await endpoint();
-    if (url.isEmpty) return;
+    if (url.isEmpty) {
+      _lastOutcome = 'no coach URL set';
+      return;
+    }
 
     // Failures back off: a coach endpoint that is down, or a phone with no
     // signal, should not be retried once per utterance forever.
     final sinceFailure = DateTime.now().difference(_lastFailureAt);
     final backoff = Duration(seconds: (5 * _consecutiveFailures).clamp(0, 60));
-    if (_consecutiveFailures > 0 && sinceFailure < backoff) return;
+    if (_consecutiveFailures > 0 && sinceFailure < backoff) {
+      _lastOutcome = 'waiting: endpoint failed $_consecutiveFailures time(s)';
+      return;
+    }
 
     final key = await _assistant.apiKey();
 
@@ -238,12 +271,14 @@ class AutoCoachService {
           .timeout(const Duration(seconds: 30));
 
       if (response.statusCode != 200) {
+        _lastOutcome = 'endpoint returned ${response.statusCode}';
         _recordFailure('endpoint returned ${response.statusCode}');
         return;
       }
 
       final body = jsonDecode(utf8.decode(response.bodyBytes));
       if (body is! Map<String, dynamic>) {
+        _lastOutcome = 'unexpected reply';
         _recordFailure('unexpected reply');
         return;
       }
@@ -251,18 +286,37 @@ class AutoCoachService {
       _consecutiveFailures = 0;
 
       final say = (body['say'] ?? '') as String;
-      if (body['fired'] != true || say.trim().isEmpty) return;
-      if (say.trim() == _lastShown) return; // the same line twice is noise
+      if (body['fired'] != true || say.trim().isEmpty) {
+        // Silence is the normal case, and the reason matters: the coach
+        // declining a line it was not asked is the feature working, not a
+        // fault, and telling the two apart is what the screen is for.
+        final why = (body['skipped'] ?? 'nothing needed') as Object;
+        _lastOutcome = 'held back by the coach: $why';
+        return;
+      }
+      if (say.trim() == _lastShown) {
+        _lastOutcome = 'held back: same line as last time';
+        return; // the same line twice is noise
+      }
 
       _lastShown = say.trim();
+      _lastLine = _lastShown;
       if (!_coachController.isClosed) _coachController.add(_lastShown);
 
       try {
-        await _bluetooth.sendPriorityText(lensText(_lastShown));
+        // The write reports whether both temples took it. That is the only
+        // honest answer to "why is the lens blank?": the coach answering and
+        // the glasses not listening look exactly alike from the outside.
+        final reached = await _bluetooth.sendPriorityText(lensText(_lastShown));
+        _lastOutcome = reached
+            ? 'on the lens'
+            : 'lens write failed - are the glasses connected?';
       } catch (e) {
+        _lastOutcome = 'lens write threw: $e';
         debugPrint('AutoCoachService: could not reach the lens: $e');
       }
     } catch (e) {
+      _lastOutcome = 'request failed: $e';
       _recordFailure(e.toString());
     }
   }

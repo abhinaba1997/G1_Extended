@@ -825,7 +825,11 @@ class BluetoothManager {
 
   /// Send text directly to glasses without display preference checks
   /// Used for dictation feedback and system messages
-  Future<void> _sendTextDirect(
+  ///
+  /// Returns whether the writes landed. Everything that draws on the lens used
+  /// to discard that answer, which is how a blank lens could be reported as a
+  /// successful send; callers that care (the coach) now get it.
+  Future<bool> _sendTextDirect(
     String text, {
     Duration delay = const Duration(seconds: 5),
     int? cancelVersion,
@@ -836,10 +840,13 @@ class BluetoothManager {
     final textMsg = TextMessage(GlassesText.prepare(text));
     List<List<int>> packets = textMsg.constructSendText();
 
+    var delivered = true;
     for (int i = 0; i < packets.length; i++) {
       // Abort if newer text has been queued
-      if (cancelVersion != null && _priorityTextVersion != cancelVersion) return;
-      await sendCommandToGlasses(packets[i]);
+      if (cancelVersion != null && _priorityTextVersion != cancelVersion) {
+        return false;
+      }
+      if (!await sendCommandToGlasses(packets[i])) delivered = false;
       if (i < 2) {
         // init packet
         await Future.delayed(Duration(milliseconds: 300));
@@ -847,12 +854,16 @@ class BluetoothManager {
         await Future.delayed(delay);
       }
     }
+    return delivered;
   }
 
   /// Send text to the glasses, bypassing the "display enabled" preference.
   /// Used for dictation feedback and system messages the user must see.
   /// and any in-flight sends are cancelled, keeping the display responsive.
-  Future<void> sendPriorityText(
+  ///
+  /// Returns true only when both temples took the bytes: a caller that shows
+  /// this on a lens someone is relying on needs to know when it did not.
+  Future<bool> sendPriorityText(
     String text, {
     Duration delay = const Duration(seconds: 5),
     bool streaming = false,
@@ -864,11 +875,11 @@ class BluetoothManager {
       // Streaming mode: send only the last page for instant feedback
       final textMsg = TextMessage(text);
       final packet = textMsg.constructStreamingText();
-      await sendCommandToGlasses(packet);
+      return sendCommandToGlasses(packet);
     } else {
       // Final send: display all pages with normal pacing
       debugPrint('Sending AI response to glasses (full): $text');
-      await _sendTextDirect(text, delay: delay, cancelVersion: version);
+      return _sendTextDirect(text, delay: delay, cancelVersion: version);
     }
   }
 

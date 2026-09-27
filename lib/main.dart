@@ -85,7 +85,12 @@ void main() async {
       WidgetPanel.schedule();
     });
     await _step('voice pipeline', VoicePipeline.singleton.start);
-    await _step('auto coach', AutoCoachService.singleton.resumeIfEnabled);
+    // Never awaited past the check. The coach listens in a loop, and a loop
+    // awaited here is a black screen with no error at all: runApp is never
+    // reached and the app sits alive on an empty screen forever.
+    await _step('auto coach', () async {
+      unawaited(AutoCoachService.singleton.resumeIfEnabled());
+    });
     await _step('legacy service', _startLegacyBackgroundService);
 
     runApp(const G1ExtendedApp());
